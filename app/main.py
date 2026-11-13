@@ -1,29 +1,28 @@
 """Single-installation church management foundation; see docs/status.md for limits."""
 
+import hashlib
 import hmac
 import os
 import secrets
-import threading
 import time
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.db import connection, initialize
+from app.limits import RequestSizeLimit
 from app.security import ADMINS, MEMBER_READERS, ROLES, hash_password, token_hash, verify_password
 
 STATIC = Path(__file__).parent / "static"
 SESSION_SECONDS = 8 * 60 * 60
 DUMMY_HASH = hash_password("not-a-real-password")
-_attempts: dict[str, deque[float]] = defaultdict(deque)
-_attempt_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -35,7 +34,17 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="MCCI CONNECT", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
 )
+app.add_middleware(RequestSizeLimit)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    # Pydantic error objects contain submitted input, including passwords. Never echo it.
+    details = [
+        {"loc": error["loc"], "msg": error["msg"], "type": error["type"]} for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": details})
 
 
 @app.middleware("http")
@@ -89,19 +98,27 @@ class Attendance(Input):
 
 
 def login_limit(request: Request) -> None:
-    # Single-process best-effort guard. A trusted edge must enforce shared limits in production.
-    ip = request.client.host if request.client else "unknown"
-    now = time.monotonic()
-    with _attempt_lock:
-        for key in list(_attempts):
-            if not _attempts[key] or _attempts[key][-1] < now - 900:
-                del _attempts[key]
-        attempts = _attempts[ip]
-        while attempts and attempts[0] < now - 900:
-            attempts.popleft()
-        if len(attempts) >= 10:
-            raise HTTPException(429, "Too many sign-in attempts. Try again later.")
-        attempts.append(now)
+    # Shared by processes using this SQLite database. A trusted edge must still limit traffic.
+    peer = request.client.host if request.client else "unknown"
+    peer_hash = hashlib.sha256(peer.encode()).hexdigest()
+    now = int(time.time())
+    limited = False
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM login_limits WHERE window_start <= ?", (now - 900,))
+        row = db.execute(
+            "SELECT attempts FROM login_limits WHERE peer_hash = ?", (peer_hash,)
+        ).fetchone()
+        if row and row["attempts"] >= 10:
+            limited = True
+        elif row:
+            db.execute(
+                "UPDATE login_limits SET attempts = attempts + 1 WHERE peer_hash = ?", (peer_hash,)
+            )
+        else:
+            db.execute("INSERT INTO login_limits VALUES (?, ?, 1)", (peer_hash, now))
+    if limited:
+        raise HTTPException(429, "Too many sign-in attempts. Try again later.")
 
 
 def current_user(request: Request) -> dict[str, Any]:
@@ -173,6 +190,21 @@ def login(data: Login, request: Request, response: Response) -> dict[str, Any]:
             audit(db, None, "session.login_failed")
             db.commit()
             raise HTTPException(401, "Invalid email or password")
+        # Serialize with account changes and recheck the credential after hashing, so a
+        # concurrent reset or deactivation cannot issue a session using an old password.
+        db.execute("BEGIN IMMEDIATE")
+        fresh = db.execute(
+            "SELECT password_hash, active, role FROM users WHERE id = ?", (row["id"],)
+        ).fetchone()
+        if (
+            not fresh
+            or not fresh["active"]
+            or fresh["role"] not in ROLES
+            or fresh["password_hash"] != row["password_hash"]
+        ):
+            audit(db, None, "session.login_failed")
+            db.commit()
+            raise HTTPException(401, "Invalid email or password")
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         db.execute("DELETE FROM sessions WHERE expires_at <= ?", (int(time.time()),))
         db.execute(
@@ -189,7 +221,7 @@ def login(data: Login, request: Request, response: Response) -> dict[str, Any]:
             secure=os.environ.get("MCCI_SECURE_COOKIES", "1") != "0",
             path="/",
         )
-        return {"email": row["email"], "role": row["role"], "csrf_token": csrf}
+        return {"email": row["email"], "role": fresh["role"], "csrf_token": csrf}
 
 
 @app.get("/api/session")

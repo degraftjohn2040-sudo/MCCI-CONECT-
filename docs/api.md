@@ -1,6 +1,6 @@
 # API
 
-All endpoints are same-origin JSON. Errors return FastAPI's `detail` and appropriate HTTP status. List endpoints accept `limit` (1–100, default 25) and `offset` (0–100000), returning `{items, has_more}`. Timestamps are SQLite UTC strings. API responses use `Cache-Control: no-store`.
+All endpoints are same-origin JSON. API request bodies are limited to 64 KiB. Errors return FastAPI's `detail` and appropriate HTTP status. List endpoints accept `limit` (1–100, default 25) and `offset` (0–100000), returning `{items, has_more}`. Timestamps are SQLite UTC strings. API responses use `Cache-Control: no-store`.
 
 - `POST /api/session`: `{email,password}` plus `X-Requested-With: MCCI-CONNECT`; sets session cookie and returns `{email,role,csrf_token}`. No public registration.
 - `GET /api/session`: current identity and CSRF token.

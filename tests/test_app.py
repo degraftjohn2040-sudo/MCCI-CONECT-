@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import connection
-from app.main import _attempts, app
+from app.main import app
 from app.security import ROLES, hash_password, token_hash
 
 PASSWORD = "a-long-test-password"
@@ -14,7 +14,6 @@ PASSWORD = "a-long-test-password"
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("MCCI_DATABASE", str(tmp_path / "test.sqlite3"))
     monkeypatch.setenv("MCCI_SECURE_COOKIES", "0")
-    _attempts.clear()
     with TestClient(app) as client:
         with connection() as db:
             password_hash = hash_password(PASSWORD)
@@ -175,3 +174,100 @@ def test_static_page_and_private_database(client, tmp_path):
     assert "MCCI CONNECT" in response.text
     assert client.get("/static/app.js").status_code == 200
     assert (tmp_path / "test.sqlite3").stat().st_mode & 0o077 == 0
+
+
+def test_oversized_and_validation_errors_do_not_echo_secrets(client):
+    too_large = client.post(
+        "/api/session", content=b"x" * 65537, headers={"Content-Type": "application/json"}
+    )
+    assert too_large.status_code == 413
+    secret = "sensitive-password-" * 20
+    invalid = client.post(
+        "/api/session",
+        json={"email": "x@y", "password": secret},
+        headers={"X-Requested-With": "MCCI-CONNECT"},
+    )
+    assert invalid.status_code == 422
+    assert secret not in invalid.text
+    assert "input" not in invalid.text
+
+
+def test_rate_limit_survives_new_clients(client):
+    from fastapi.testclient import TestClient
+
+    for _ in range(10):
+        assert login(client, password="wrong").status_code == 401
+    with TestClient(app) as another_client:
+        assert login(another_client).status_code == 429
+
+
+def test_reset_or_deactivation_during_login_cannot_issue_session(client, monkeypatch):
+    import app.main as main
+
+    original = main.verify_password
+
+    def change_password(password, encoded):
+        result = original(password, encoded)
+        with connection() as db:
+            db.execute("UPDATE users SET active = 0 WHERE role = 'owner'")
+        return result
+
+    monkeypatch.setattr(main, "verify_password", change_password)
+    assert login(client).status_code == 401
+    with connection() as db:
+        assert db.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+
+
+def test_account_administration_and_session_revocation(client):
+    from app.manage import account_change
+
+    login(client)
+    with pytest.raises(ValueError, match="last active owner"):
+        account_change("owner@example.test", "disable-user")
+    account_change("owner@example.test", "reset-password", "a-new-long-password")
+    assert client.get("/api/session").status_code == 401
+    assert login(client, password=PASSWORD).status_code == 401
+    assert login(client, password="a-new-long-password").status_code == 200
+    account_change("owner@example.test", "revoke-sessions")
+    assert client.get("/api/session").status_code == 401
+    account_change("pastor@example.test", "disable-user")
+    assert login(client, "pastor").status_code == 401
+    account_change("pastor@example.test", "enable-user")
+    assert login(client, "pastor").status_code == 200
+    with connection() as db:
+        actions = {row[0] for row in db.execute("SELECT action FROM audit_log")}
+        assert "user.reset_password_by_cli" in actions
+        assert "user.disable_user_by_cli" in actions
+
+
+def test_limit_is_atomic_across_threads(client):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.main import login_limit
+
+    request = SimpleNamespace(client=SimpleNamespace(host="parallel-test"))
+
+    def attempt(_):
+        try:
+            login_limit(request)
+            return 200
+        except HTTPException as exc:
+            return exc.status_code
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(attempt, range(20)))
+    assert results.count(200) == 10
+    assert results.count(429) == 10
+
+
+def test_startup_preserves_existing_data(client):
+    from app.db import initialize
+
+    headers = {"X-CSRF-Token": login(client).json()["csrf_token"]}
+    client.post("/api/members", json={"name": "Existing"}, headers=headers)
+    initialize()
+    initialize()
+    assert client.get("/api/members").json()["items"][0]["name"] == "Existing"

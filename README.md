@@ -18,7 +18,7 @@ export MCCI_SECURE_COOKIES=0
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open http://127.0.0.1:8000. The command prompts for the password without echo; use a unique password of 12–256 characters. There is no default account or self-registration. The account command has privileged access to the local database and should only be used by a trusted operator. To run on a remote preview host, bind to `0.0.0.0` only in an isolated environment; never expose this development setup to the public or use real data there.
+Open http://127.0.0.1:8000. The command prompts for the password without echo; use a unique password of 12–256 characters. There is no default account or self-registration. Trusted operators can use `python -m app.manage reset-password`, `disable-user`, `enable-user`, or `revoke-sessions` followed by an account email. Reset and disable revoke existing sessions. The account command has privileged access to the local database and should only be used by a trusted operator. To run on a remote preview host, bind to `0.0.0.0` only in an isolated environment; never expose this development setup to the public or use real data there.
 
 Data defaults to `data/mcci.sqlite3` (ignored by Git); set `MCCI_DATABASE` to an absolute path on persistent private storage. `MCCI_SECURE_COOKIES` defaults to `1`. Only set it to `0` for local HTTP development. No sample members or credentials are provided.
 

@@ -4,6 +4,7 @@ SQLite is created on first startup via idempotent `CREATE TABLE IF NOT EXISTS`; 
 
 - `users`: email (case-insensitive unique), password hash, role, active flag.
 - `sessions`: SHA-256 token hash, user FK, CSRF token, expiry; expiry indexed.
+- `login_limits`: hashed direct peer, fixed-window start and count; expired entries are removed during login attempts. This is an additive table for existing databases.
 - `members`: name, optional phone/email, creation time; case-insensitive name/id index supports directory ordering.
 - `attendance`: event name, date, nonnegative aggregate count, creation time; date/id index supports ordering.
 - `announcements`: title, body, creation time; primary key supports reverse chronological listing.

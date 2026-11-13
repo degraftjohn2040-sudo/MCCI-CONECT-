@@ -7,7 +7,8 @@ At base commit `5b1630c9cab62b3f6238ebeb44c5aca890a7802c`, the entire tracked re
 ## Implemented in this stage
 
 - FastAPI/Python backend; vanilla HTML/CSS/JavaScript responsive interface; SQLite single-installation storage.
-- Locally provisioned accounts for all 12 requested role names; server-side permission checks; expiring server-side sessions; CSRF protection; limited in-process sign-in throttling.
+- Locally provisioned accounts for all 12 requested role names; server-side permission checks; expiring server-side sessions; CSRF protection; SQLite-backed sign-in throttling shared by processes using the same database.
+- Trusted local CLI account disable/enable, password reset and session revocation; reset and deactivation revoke existing sessions.
 - Create/list member names and optional contact details, aggregate attendance counts, and internal announcements; paginated list endpoints. Admin-only list of basic audit events. Online SQLite snapshot command.
 - CI configuration for lint, formatting, Python type checks, tests, compilation/JS syntax, dependency vulnerability audit and secret scan.
 
@@ -17,7 +18,7 @@ This is a pre-production prototype. Member records cannot yet be edited, deleted
 
 ## Not implemented
 
-Contact import; pastoral follow-up; communities; prayer requests; form builder, templates, public links and responses; spreadsheet editing; WhatsApp/SMS/email actions or delivery; AI assistant and API secret storage; Google Workspace; analytics; Android native app; MFA, recovery/reset, admin UI for account management, automated backups, retention/deletion workflows, and operational monitoring. Connected services have not been configured or verified. Do not assume any integration exists.
+Contact import; pastoral follow-up; communities; prayer requests; form builder, templates, public links and responses; spreadsheet editing; WhatsApp/SMS/email actions or delivery; AI assistant and API secret storage; Google Workspace; analytics; Android native app; MFA, self-service recovery/reset, admin UI for account management, automated backups, retention/deletion workflows, and operational monitoring. Connected services have not been configured or verified. Do not assume any integration exists.
 
 ## Readiness
 

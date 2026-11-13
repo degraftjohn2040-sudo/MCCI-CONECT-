@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     csrf_token TEXT NOT NULL, expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS login_limits (
+    peer_hash TEXT PRIMARY KEY, window_start INTEGER NOT NULL, attempts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS login_limits_window ON login_limits(window_start);
 CREATE TABLE IF NOT EXISTS members (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '',
     email TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
