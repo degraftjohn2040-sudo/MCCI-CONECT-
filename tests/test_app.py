@@ -396,3 +396,71 @@ def test_contact_import_rejects_invalid_csv(client, csv_text):
     )
     assert result.status_code == 422
     assert client.get("/api/members").json()["items"] == []
+
+
+def test_restore_preserves_records_revokes_sessions_and_refuses_overwrite(client, tmp_path):
+    import sqlite3
+
+    from app.backup import backup
+    from app.restore import restore
+
+    headers = {"X-CSRF-Token": login(client).json()["csrf_token"]}
+    client.post("/api/members", json={"name": "Restored"}, headers=headers)
+    snapshot, restored = tmp_path / "snapshot.db", tmp_path / "restored.db"
+    backup(snapshot)
+    restore(snapshot, restored)
+    with sqlite3.connect(restored) as db:
+        assert db.execute("SELECT name FROM members").fetchone()[0] == "Restored"
+        assert db.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    with sqlite3.connect(snapshot) as db:
+        assert db.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
+    with pytest.raises(FileExistsError):
+        restore(snapshot, restored)
+    assert restored.stat().st_mode & 0o077 == 0
+
+
+def test_restore_rejects_invalid_snapshot_without_leaving_output(client, tmp_path):
+    import sqlite3
+
+    from app.restore import restore
+
+    invalid = tmp_path / "invalid.db"
+    with sqlite3.connect(invalid) as db:
+        db.execute("CREATE TABLE other(id INTEGER)")
+    restored = tmp_path / "restored.db"
+    with pytest.raises(RuntimeError, match="not an MCCI database"):
+        restore(invalid, restored)
+    assert not restored.exists()
+    assert invalid.exists()
+
+
+def test_streamed_api_body_limit_rejects_without_calling_application():
+    import asyncio
+
+    from app.limits import RequestSizeLimit
+
+    called = False
+    sent = []
+    chunks = iter(
+        [
+            {"type": "http.request", "body": b"a" * 40000, "more_body": True},
+            {"type": "http.request", "body": b"b" * 30000, "more_body": False},
+        ]
+    )
+
+    async def application(scope, receive, send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        return next(chunks)
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(
+        RequestSizeLimit(application)({"type": "http", "path": "/api/session"}, receive, send)
+    )
+    assert not called
+    assert sent[0]["status"] == 413
