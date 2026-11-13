@@ -1,0 +1,7 @@
+# Deployment
+
+No deployment configuration existed in the initial repository and no deployment has been performed. This foundation is not production-ready. Do not deploy to a public host or put real data in it without MCCI approval, a security/privacy review, and completion of the release gates below.
+
+A future deployment needs HTTPS at a trusted reverse proxy, secure cookies (`MCCI_SECURE_COOKIES=1`, the default), shared rate limiting, body-size/time limits, restricted administrative access, an appropriate ASGI process manager, persistent encrypted storage, secret management, monitoring, backups, restore drills and a tested rollback. Configure access logs to avoid sensitive bodies and tokens. Do not accept untrusted forwarded IP headers. Bind application services privately behind the proxy. The current throttling is per process and sees the direct peer; it is not sufficient behind a proxy or across workers. Use one instance and supported SQLite local storage until the architecture is migrated. Filesystem permissions must restrict the database and backups to trusted operators. Provision accounts locally using `python -m app.manage create-user`; never pass passwords as arguments or environment variables.
+
+Vercel/serverless and ephemeral filesystems are not suitable for the current SQLite design. No Google, messaging or AI provider configuration has been verified. Pin and review the full dependency graph before a reproducible release, and set up migration/version management before changing a real database.

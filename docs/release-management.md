@@ -1,0 +1,3 @@
+# Release management
+
+Use small pull requests with scoped tests, security/privacy review for sensitive changes, and a rollback plan. Tag releases only after CI passes and an authorized MCCI owner approves. Before production: agree role and privacy rules, complete threat modeling and independent review, lock dependencies, test migrations and restore, establish monitoring/on-call and incident response, execute mobile/accessibility/load and end-to-end tests, and document recovery objectives. No release or deployment has been approved. For future schema changes, rehearse a forward migration and a restore-based rollback on a copy; never assume an old binary can safely use a new schema.
