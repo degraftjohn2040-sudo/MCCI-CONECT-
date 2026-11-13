@@ -1,0 +1,7 @@
+# Performance
+
+The interface is same-origin static assets with no frontend framework, fonts, images, or third-party scripts. Lists are bounded and paginated (25 by default, max 100); indexes support member prefix searches, contact equality lookups, and attendance sort order and primary keys support other reverse-ID listings. SQLite writes and audit events are atomic. Responses with personal data are not cached.
+
+A small synthetic query-plan experiment has been run; see [engineering audit](audit.md). No endpoint performance benchmarks, load tests, accessibility audits, or poor-network simulations have been run. Offset pagination gets more expensive at high offsets and can shift as records are inserted. SQLite serializes writes; SQLite-backed login limiting and deployment are not a horizontal-scaling design. There is no offline queue, service worker, retries, image pipeline or code splitting (assets are small and unbundled). Test on representative Android devices and poor networks, measure latency and query plans with synthetic data, and add cursor pagination and a managed DB as needed. Protect API payload and connection sizes at the edge.
+
+CSV imports are bounded to 100 records and run atomically under a SQLite write lock. Duplicate checks use indexed email/phone equality, but large concurrent imports can delay other writers. Name prefix search uses SQLite NOCASE, which is ASCII-oriented; test language-specific behavior before use.
