@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added safe restore-to-new-file with session revocation, Python 3.11 dependency hash locks, and a buildable wheel/source distribution.
+
 - Added additive schema upgrades, member prefix search, optimistic edits and deletion, and bounded transactional CSV contact import.
 
 - Hardened sign-in against account-change races; added shared SQLite login throttling, bounded API bodies, redacted validation errors, and local account recovery/revocation commands.
