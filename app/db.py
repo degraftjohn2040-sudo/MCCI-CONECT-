@@ -74,3 +74,24 @@ def initialize() -> None:
     with connection() as db:
         db.execute("PRAGMA journal_mode = WAL")
         db.executescript(SCHEMA)
+        # Additive upgrades only; keep existing tables and records intact. The migration
+        # ledger and changes commit atomically and can be safely retried after interruption.
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        applied = {row[0] for row in db.execute("SELECT version FROM schema_migrations")}
+        if any(version > 3 for version in applied):
+            raise RuntimeError("Database schema is newer than this application")
+        if 1 not in applied:
+            db.execute("INSERT INTO schema_migrations(version) VALUES (1)")
+        if 2 not in applied:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(members)")}
+            if "version" not in columns:
+                db.execute("ALTER TABLE members ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            db.execute("INSERT INTO schema_migrations(version) VALUES (2)")
+        if 3 not in applied:
+            db.execute("CREATE INDEX IF NOT EXISTS members_email ON members(email COLLATE NOCASE)")
+            db.execute("CREATE INDEX IF NOT EXISTS members_phone ON members(phone)")
+            db.execute("INSERT INTO schema_migrations(version) VALUES (3)")

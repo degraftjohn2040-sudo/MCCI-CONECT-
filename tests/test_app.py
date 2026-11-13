@@ -271,3 +271,128 @@ def test_startup_preserves_existing_data(client):
     initialize()
     initialize()
     assert client.get("/api/members").json()["items"][0]["name"] == "Existing"
+
+
+def test_member_search_edits_and_conflicts(client):
+    headers = {"X-CSRF-Token": login(client).json()["csrf_token"]}
+    ids = []
+    for name in ["Alice", "Alicia", "A%literal", "Bob"]:
+        ids.append(client.post("/api/members", json={"name": name}, headers=headers).json()["id"])
+    assert [r["name"] for r in client.get("/api/members?q=ali").json()["items"]] == [
+        "Alice",
+        "Alicia",
+    ]
+    assert [r["name"] for r in client.get("/api/members", params={"q": "A%"}).json()["items"]] == [
+        "A%literal"
+    ]
+    update = {"name": "Alice Updated", "phone": "123", "email": "", "version": 1}
+    assert client.put(f"/api/members/{ids[0]}", json=update, headers=headers).json()["version"] == 2
+    assert client.put(f"/api/members/{ids[0]}", json=update, headers=headers).status_code == 409
+    assert client.delete(f"/api/members/{ids[0]}?version=1", headers=headers).status_code == 409
+    assert client.delete(f"/api/members/{ids[0]}?version=2").status_code == 403
+    assert client.delete(f"/api/members/{ids[0]}?version=2", headers=headers).status_code == 204
+    assert client.delete(f"/api/members/{ids[0]}?version=2", headers=headers).status_code == 404
+    actions = [r["action"] for r in client.get("/api/audit").json()["items"]]
+    assert actions.count("member.updated") == 1
+    assert actions.count("member.deleted") == 1
+
+
+def test_member_mutations_forbidden_to_pastor(client):
+    admin_headers = {"X-CSRF-Token": login(client).json()["csrf_token"]}
+    member_id = client.post("/api/members", json={"name": "Safe"}, headers=admin_headers).json()[
+        "id"
+    ]
+    pastor_headers = {"X-CSRF-Token": login(client, "pastor").json()["csrf_token"]}
+    assert (
+        client.put(
+            f"/api/members/{member_id}",
+            json={"name": "Changed", "version": 1},
+            headers=pastor_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.delete(f"/api/members/{member_id}?version=1", headers=pastor_headers).status_code
+        == 403
+    )
+    assert client.get("/api/members").json()["items"][0]["name"] == "Safe"
+
+
+def test_legacy_database_additive_migration(tmp_path, monkeypatch):
+    import sqlite3
+
+    from app.db import SCHEMA, initialize
+
+    path = tmp_path / "legacy.sqlite3"
+    monkeypatch.setenv("MCCI_DATABASE", str(path))
+    with sqlite3.connect(path) as db:
+        db.executescript(SCHEMA)
+        db.execute("INSERT INTO members(name, phone) VALUES ('Legacy', '123')")
+    initialize()
+    initialize()
+    with connection() as db:
+        member = db.execute("SELECT name, phone, version FROM members").fetchone()
+        assert tuple(member) == ("Legacy", "123", 1)
+        assert [
+            row[0] for row in db.execute("SELECT version FROM schema_migrations ORDER BY version")
+        ] == [1, 2, 3]
+        db.execute("INSERT INTO schema_migrations(version) VALUES (99)")
+    with pytest.raises(RuntimeError, match="newer"):
+        initialize()
+
+
+def test_contact_import_is_atomic_and_restricted(client):
+    headers = {"X-CSRF-Token": login(client).json()["csrf_token"]}
+    payload = {
+        "csv_text": (
+            'name,phone,email\n"Doe, Jane",123,jane@example.test\nJohn,456,john@example.test'
+        ),
+        "confirmed_permission": True,
+    }
+    result = client.post("/api/members/import", json=payload, headers=headers)
+    assert result.status_code == 201
+    assert result.json() == {"imported": 2}
+    assert len(client.get("/api/members").json()["items"]) == 2
+    # The first row would be valid; a later duplicate must roll everything back.
+    payload["csv_text"] = "name,email\nNew,new@example.test\nDup,JANE@example.test"
+    assert client.post("/api/members/import", json=payload, headers=headers).status_code == 409
+    assert len(client.get("/api/members").json()["items"]) == 2
+    assert (
+        len(
+            [
+                r
+                for r in client.get("/api/audit").json()["items"]
+                if r["action"] == "member.imported"
+            ]
+        )
+        == 2
+    )
+    payload["confirmed_permission"] = False
+    assert client.post("/api/members/import", json=payload, headers=headers).status_code == 422
+    pastor_headers = {"X-CSRF-Token": login(client, "pastor").json()["csrf_token"]}
+    payload["confirmed_permission"] = True
+    assert (
+        client.post("/api/members/import", json=payload, headers=pastor_headers).status_code == 403
+    )
+
+
+@pytest.mark.parametrize(
+    "csv_text",
+    [
+        "email\na@example.test",
+        "name,name\nA,B",
+        "name,unknown\nA,B",
+        "name,email\nA",
+        'name\n"unterminated',
+        "name\n",
+    ],
+)
+def test_contact_import_rejects_invalid_csv(client, csv_text):
+    headers = {"X-CSRF-Token": login(client).json()["csrf_token"]}
+    result = client.post(
+        "/api/members/import",
+        json={"csv_text": csv_text, "confirmed_permission": True},
+        headers=headers,
+    )
+    assert result.status_code == 422
+    assert client.get("/api/members").json()["items"] == []

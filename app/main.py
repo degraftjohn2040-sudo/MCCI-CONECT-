@@ -1,7 +1,9 @@
 """Single-installation church management foundation; see docs/status.md for limits."""
 
+import csv
 import hashlib
 import hmac
+import io
 import os
 import secrets
 import time
@@ -14,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.db import connection, initialize
 from app.limits import RequestSizeLimit
@@ -84,6 +86,22 @@ class Member(Input):
         if value and ("@" not in value or any(c.isspace() for c in value)):
             raise ValueError("Enter a valid email address")
         return value
+
+
+class MemberImport(Input):
+    csv_text: str = Field(min_length=1, max_length=60000)
+    confirmed_permission: bool = Field(strict=True)
+
+    @field_validator("confirmed_permission")
+    @classmethod
+    def must_confirm(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("Confirm permission before importing")
+        return value
+
+
+class MemberUpdate(Member):
+    version: int = Field(ge=1, strict=True)
 
 
 class Announcement(Input):
@@ -242,13 +260,19 @@ def logout(request: Request, response: Response, user: User) -> None:
 
 @app.get("/api/members")
 def members(
-    _user: Reader, limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0, le=100000)
+    _user: Reader,
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=100000),
+    q: str = Query("", max_length=120),
 ) -> dict[str, Any]:
+    # Prefix search uses the existing NOCASE name index; treat wildcards literally.
+    escaped = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     with connection() as db:
         rows = db.execute(
-            "SELECT id, name, phone, email, created_at FROM members "
+            "SELECT id, name, phone, email, created_at, version FROM members "
+            "WHERE name LIKE ? ESCAPE '\\' "
             "ORDER BY name COLLATE NOCASE, id LIMIT ? OFFSET ?",
-            (limit + 1, offset),
+            (escaped + "%", limit + 1, offset),
         ).fetchall()
     return {"items": [dict(row) for row in rows[:limit]], "has_more": len(rows) > limit}
 
@@ -263,6 +287,80 @@ def add_member(data: Member, user: Admin) -> dict[str, int]:
         assert cur.lastrowid is not None
         audit(db, user["id"], "member.created", cur.lastrowid)
         return {"id": cur.lastrowid}
+
+
+@app.post("/api/members/import", status_code=201)
+def import_members(data: MemberImport, user: Admin) -> dict[str, int]:
+    # Strict bounded CSV: no automatic merge, overwrite or partial import.
+    try:
+        reader = csv.DictReader(io.StringIO(data.csv_text, newline=""), strict=True)
+        fields = reader.fieldnames or []
+        if not fields or len(fields) != len(set(fields)) or "name" not in fields:
+            raise HTTPException(422, "CSV must have a name header and no duplicate headers")
+        if set(fields) - {"name", "phone", "email"}:
+            raise HTTPException(422, "CSV headers must be name, phone, and/or email")
+        members_to_import: list[tuple[int, Member]] = []
+        for row in reader:
+            if len(members_to_import) >= 100:
+                raise HTTPException(422, "Import is limited to 100 rows")
+            if None in row or any(value is None for value in row.values()):
+                raise HTTPException(422, f"Invalid CSV columns at row {reader.line_num}")
+            try:
+                members_to_import.append((reader.line_num, Member.model_validate(row)))
+            except ValidationError:
+                raise HTTPException(422, f"Invalid member at row {reader.line_num}") from None
+    except csv.Error:
+        raise HTTPException(422, "Invalid CSV format") from None
+    if not members_to_import:
+        raise HTTPException(422, "CSV contains no members")
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        for position, member in members_to_import:
+            duplicate = db.execute(
+                "SELECT 1 FROM members WHERE (email != '' AND email = ? COLLATE NOCASE) "
+                "OR (phone != '' AND phone = ?) LIMIT 1",
+                (member.email, member.phone),
+            ).fetchone()
+            if duplicate:
+                raise HTTPException(
+                    409, f"Possible duplicate contact at row {position}; nothing was imported"
+                )
+            cur = db.execute(
+                "INSERT INTO members(name, phone, email) VALUES (?, ?, ?)",
+                (member.name, member.phone, member.email),
+            )
+            audit(db, user["id"], "member.imported", cur.lastrowid)
+    return {"imported": len(members_to_import)}
+
+
+@app.put("/api/members/{member_id}")
+def update_member(member_id: int, data: MemberUpdate, user: Admin) -> dict[str, int]:
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT version FROM members WHERE id = ?", (member_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Member not found")
+        if row["version"] != data.version:
+            raise HTTPException(409, "This record changed. Refresh before editing again.")
+        db.execute(
+            "UPDATE members SET name = ?, phone = ?, email = ?, version = version + 1 WHERE id = ?",
+            (data.name, data.phone, data.email, member_id),
+        )
+        audit(db, user["id"], "member.updated", member_id)
+        return {"id": member_id, "version": data.version + 1}
+
+
+@app.delete("/api/members/{member_id}", status_code=204)
+def delete_member(member_id: int, user: Admin, version: int = Query(ge=1)) -> None:
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT version FROM members WHERE id = ?", (member_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Member not found")
+        if row["version"] != version:
+            raise HTTPException(409, "This record changed. Refresh before deleting it.")
+        db.execute("DELETE FROM members WHERE id = ?", (member_id,))
+        audit(db, user["id"], "member.deleted", member_id)
 
 
 @app.get("/api/announcements")

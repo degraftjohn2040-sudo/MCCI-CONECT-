@@ -3,6 +3,8 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => document.querySelectorAll(selector);
 let session = null;
 let page = 'overview';
+let memberEdit = null;
+let memberQuery = '';
 const offsets = { members: 0, attendance: 0, announcements: 0, audit: 0 };
 const admins = ['owner', 'admin', 'super_admin'];
 const readers = [...admins, 'pastor'];
@@ -26,6 +28,8 @@ function showLogin(message = '') {
   $$('form').forEach((form) => form.reset());
   $$('.form-message').forEach((el) => { el.textContent = ''; });
   $('#account-email').textContent = '';
+  memberQuery = '';
+  resetMemberEdit();
   $('#login-error').textContent = message;
   // Do not leave sensitive record text in the DOM after logout or expiry.
   for (const name of Object.keys(offsets)) { $(`#${name}-list`).replaceChildren(); offsets[name] = 0; }
@@ -70,6 +74,18 @@ function renderItem(name, item) {
     const info = document.createElement('div');
     info.append(text('h3', item.name), text('p', [item.email, item.phone].filter(Boolean).join(' · ') || 'No contact details'));
     row.append(avatar, info);
+    if (admins.includes(session.role)) {
+      const actions = document.createElement('div');
+      actions.className = 'record-actions';
+      const edit = text('button', 'Edit', 'secondary');
+      edit.setAttribute('aria-label', `Edit ${item.name}`);
+      edit.addEventListener('click', () => editMember(item));
+      const remove = text('button', 'Delete', 'secondary');
+      remove.setAttribute('aria-label', `Delete ${item.name}`);
+      remove.addEventListener('click', () => deleteMember(item));
+      actions.append(edit, remove);
+      row.append(actions);
+    }
   } else if (name === 'announcements') {
     const info = document.createElement('div');
     info.append(text('h3', item.title), text('p', item.body, 'pre-wrap'), text('small', `${item.created_at} UTC`));
@@ -91,7 +107,8 @@ async function load(name) {
   list.replaceChildren(text('p', 'Loading…', 'empty'));
   pagination.replaceChildren();
   try {
-    const result = await api(`/api/${name}?limit=25&offset=${offsets[name]}`);
+    const query = name === 'members' ? `&q=${encodeURIComponent(memberQuery)}` : '';
+    const result = await api(`/api/${name}?limit=25&offset=${offsets[name]}${query}`);
     if (!session || page !== name) return;
     list.replaceChildren();
     if (!result.items.length) list.append(text('p', 'Nothing here yet. Records will appear here when added.', 'empty'));
@@ -108,6 +125,59 @@ async function load(name) {
     }
   } catch (error) { if (session && page === name) list.replaceChildren(text('p', error.message, 'empty error')); }
 }
+function resetMemberEdit() {
+  memberEdit = null;
+  $('#members-form').reset();
+  $('#member-form-title').textContent = 'Add a member';
+  $('#member-submit-label').textContent = 'Add member';
+  $('#cancel-member-edit').hidden = true;
+}
+function editMember(item) {
+  memberEdit = { id: item.id, version: item.version };
+  const form = $('#members-form');
+  for (const key of ['name', 'phone', 'email']) form.elements[key].value = item[key];
+  form.querySelector('.form-message').textContent = '';
+  $('#member-form-title').textContent = 'Edit member';
+  $('#member-submit-label').textContent = 'Save changes';
+  $('#cancel-member-edit').hidden = false;
+  form.elements.name.focus();
+}
+async function deleteMember(item) {
+  if (!window.confirm(`Permanently delete ${item.name}? Backups may retain a copy.`)) return;
+  try {
+    await api(`/api/members/${item.id}?version=${item.version}`, { method: 'DELETE' });
+    if (memberEdit && memberEdit.id === item.id) resetMemberEdit();
+    await load('members');
+  } catch (error) {
+    if (session) { $('#global-error').textContent = error.message; $('#global-error').hidden = false; }
+  }
+}
+$('#cancel-member-edit').addEventListener('click', resetMemberEdit);
+$('#member-search').addEventListener('submit', (event) => {
+  event.preventDefault();
+  memberQuery = $('#member-query').value.trim();
+  offsets.members = 0;
+  load('members');
+});
+$('#member-import').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = form.querySelector('.form-message');
+  const button = form.querySelector('button');
+  button.disabled = true;
+  message.textContent = 'Importing…';
+  try {
+    const result = await api('/api/members/import', {
+      method: 'POST',
+      body: JSON.stringify({ csv_text: form.elements.csv_text.value, confirmed_permission: form.elements.confirmed_permission.checked })
+    });
+    form.reset();
+    offsets.members = 0;
+    message.textContent = `${result.imported} contacts imported.`;
+    await load('members');
+  } catch (error) { message.textContent = error.message; }
+  finally { button.disabled = false; }
+});
 $('#login-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -139,8 +209,12 @@ $$('[data-go]').forEach((button) => button.addEventListener('click', () => navig
     button.disabled = true;
     message.textContent = 'Saving…';
     try {
-      await api(`/api/${name}`, { method: 'POST', body: JSON.stringify(values) });
-      form.reset(); offsets[name] = 0; message.textContent = 'Saved successfully.'; await load(name);
+      const editing = name === 'members' && memberEdit;
+      if (editing) values.version = memberEdit.version;
+      const endpoint = editing ? `/api/members/${memberEdit.id}` : `/api/${name}`;
+      await api(endpoint, { method: editing ? 'PUT' : 'POST', body: JSON.stringify(values) });
+      if (name === 'members') resetMemberEdit(); else form.reset();
+      offsets[name] = 0; message.textContent = 'Saved successfully.'; await load(name);
     } catch (error) { message.textContent = error.message; }
     finally { button.disabled = false; }
   });
